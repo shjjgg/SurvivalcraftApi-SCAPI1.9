@@ -1,0 +1,142 @@
+# .github/workflows/build-browser.yml
+name: Build Browser (WASM)
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'Engine/**'
+      - 'Engine.Browser/**'
+      - 'Survivalcraft/**'
+      - 'Survivalcraft.Browser/**'
+      - '.github/workflows/**'
+      - '**/*.props'
+      - '**/*.csproj'
+      - '**/*.csx'
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: '10.0.x'
+
+jobs:
+  build-browser:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Fix csx path separators (Linux compatibility)
+        run: |
+          sed -i 's|$(MSBuildProjectDirectory)\\GenerateContentInfo.csx|$(MSBuildProjectDirectory)/GenerateContentInfo.csx|g' Survivalcraft.Browser/Survivalcraft.Browser.csproj
+          sed -i 's|$(MSBuildProjectDirectory)\\PatchJs.csx|$(MSBuildProjectDirectory)/PatchJs.csx|g' Survivalcraft.Browser/Survivalcraft.Browser.csproj
+          sed -i 's|wwwroot\\|wwwroot/|g' Survivalcraft.Browser/Survivalcraft.Browser.csproj
+
+      - name: Create Content.zip
+        run: |
+          cd Survivalcraft
+          zip -r Content.zip Content/
+          ls -la Content.zip
+          cd ..
+
+      - name: Setup .NET ${{ env.DOTNET_VERSION }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Install WASM workload
+        run: dotnet workload install wasm-tools
+
+      - name: Restore Browser projects only
+        run: |
+          dotnet restore Engine/Engine.csproj
+          dotnet restore Engine.Browser/Engine.Browser.csproj
+          dotnet restore Survivalcraft/Survivalcraft.csproj
+          dotnet restore Survivalcraft.Browser/Survivalcraft.Browser.csproj
+
+      - name: Build Engine
+        run: |
+          dotnet build Engine/Engine.csproj \
+            -c Release \
+            --no-restore
+
+      - name: Build Engine.Browser
+        run: |
+          dotnet build Engine.Browser/Engine.Browser.csproj \
+            -c Release \
+            -r browser-wasm \
+            --no-restore
+
+      - name: Build Survivalcraft
+        run: |
+          dotnet build Survivalcraft/Survivalcraft.csproj \
+            -c Release \
+            --no-restore
+
+      - name: Build Survivalcraft.Browser (AOT Release)
+        run: |
+          dotnet publish Survivalcraft.Browser/Survivalcraft.Browser.csproj \
+            -c Release \
+            -r browser-wasm \
+            --self-contained \
+            -p:RunAOTCompilation=true \
+            -p:WasmBuildNative=true \
+            -p:WasmEnableThreads=true \
+            -p:WasmEnableSIMD=true \
+            -p:WasmStripILAfterAOT=true \
+            -p:DebuggerSupport=false \
+            -p:WasmEnableExceptionHandling=false \
+            -p:PublishTrimmed=true \
+            -p:TrimMode=full \
+            -p:TrimmerRemoveSymbols=true \
+            --no-restore
+
+      - name: Find and list output files
+        run: |
+          echo "=== Searching for publish output ==="
+          find Survivalcraft.Browser -type d -name "publish" 2>/dev/null
+          find Survivalcraft.Browser -type d -name "AppBundle" 2>/dev/null
+          find Survivalcraft.Browser -type d -name "wwwroot" 2>/dev/null
+          
+          echo "=== bin directory structure ==="
+          ls -la Survivalcraft.Browser/bin/Release/net10.0/ || true
+          
+          echo "=== All files in browser-wasm ==="
+          find Survivalcraft.Browser/bin/Release/net10.0/browser-wasm -type f 2>/dev/null | head -30
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: survivalcraft-browser-${{ github.sha }}
+          path: |
+            Survivalcraft.Browser/bin/Release/net10.0/browser-wasm/AppBundle/
+            Survivalcraft.Browser/bin/Release/net10.0/browser-wasm/publish/
+            Survivalcraft.Browser/bin/Release/net10.0/publish/
+            !**/*.pdb
+            !**/*.dbg
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Create ZIP archive
+        run: |
+          OUTPUT_DIR=$(find Survivalcraft.Browser/bin/Release/net10.0/browser-wasm -type d \( -name "AppBundle" -o -name "publish" \) | head -1)
+          if [ -n "$OUTPUT_DIR" ]; then
+            cd "$OUTPUT_DIR"
+            zip -r ../../../../../survivalcraft-browser.zip .
+          else
+            echo "No output directory found"
+            exit 1
+          fi
+          
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: survivalcraft-browser-zip-${{ github.sha }}
+          path: survivalcraft-browser.zip
+          retention-days: 30
+          if-no-files-found: warn
